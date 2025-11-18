@@ -1,51 +1,45 @@
+
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <Wire.h>
-#include <ADS1015_WE.h>
 #include <Arduino_JSON.h>
 #include <math.h>
 
-// Uncomment to enable verbose serial debug logs
-//#define ENABLE_DEBUG_LOGS
-
-#ifdef ENABLE_DEBUG_LOGS
-#define DBG_PRINT(...)   Serial.print(__VA_ARGS__)
-#define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
-#define DBG_PRINTF(...)  Serial.printf(__VA_ARGS__)
-#else
-#define DBG_PRINT(...)
-#define DBG_PRINTLN(...)
-#define DBG_PRINTF(...)
+// -------- Debug flag --------
+#ifndef ENABLE_DEBUG_LOGS
+#define ENABLE_DEBUG_LOGS true
 #endif
 
-// ---------- I2C / ADS1015 ----------
-#define I2C_ADDRESS 0x48
-ADS1015_WE adc(I2C_ADDRESS);
+#if ENABLE_DEBUG_LOGS
+  #define DBG_PRINT(x)    Serial.print(x)
+  #define DBG_PRINTLN(x)  Serial.println(x)
+#else
+  #define DBG_PRINT(x)
+  #define DBG_PRINTLN(x)
+#endif
 
+// -------- WiFi / backend --------
 const char* WIFI_SSID     = "Wifi_Leufulab";
 const char* WIFI_PASSWORD = "LeufuWifi25";
 
-// Cambia esto por la IP de tu backend
 const char* INGEST_URL = "http://192.168.3.79:8000/ingest";
-const char* API_KEY    = "leufu25";          // debe coincidir con el backend
+const char* API_KEY    = "leufu25";
 
-// Campos lógicos del JSON
-const char* SUBJECT_ID  = "RAW_TEST";
-const char* DEVICE_ID   = "emg_raw";
-const char* SENSOR_TYPE = "EMG_RAW";
+// -------- Logical identifiers --------
+const char* SUBJECT_ID  = "Demo";
+const char* DEVICE_ID   = "GSR01";
+const char* SENSOR_TYPE = "GSR";
 
-// ---------- EMG / paquetes ----------
-const int SAMPLE_RATE_HZ   = 3300;   // objetivo, solo referencia
-const int PACK_SAMPLES     = 20;     // nº de muestras por paquete ("raw")
-const int FEATURE_DECIMATE = 10;     // enviar mean/rms/peak cada 10 paquetes
-const int HTTP_RETRIES     = 3;      // reintentos para asegurar el envío
-const int HTTP_TIMEOUT_MS  = 5000;   // timeout del POST en milisegundos
+// -------- Sampling --------
+const int   GSR_PIN          = A10;      // analog pin for the GSR divider
+const int   SAMPLE_RATE_HZ   = 100;     // 100 Hz
+const int   PACK_SAMPLES     = 20;      // samples per packet
+const float SAMPLE_PERIOD_MS = 1000.0f / SAMPLE_RATE_HZ;
 
-float     samples_uv[PACK_SAMPLES];  // buffer en microvolts
-int       sample_index   = 0;
-uint32_t  packet_index   = 0;
+float     samples_raw[PACK_SAMPLES];
+int       sample_index  = 0;
+unsigned long last_sample_ms = 0;
 
-// ---------- WiFi helpers ----------
+// -------- WiFi helpers --------
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
@@ -70,44 +64,8 @@ void connectWiFi() {
   }
 }
 
-// ---------- ADS1015 helpers ----------
-void setupADC() {
-  if (!adc.init()) {
-    Serial.println("ADS1015 not connected!");
-    while (true) {
-      delay(1000);
-    }
-  }
-
-  adc.setVoltageRange_mV(ADS1015_RANGE_6144);
-  adc.setConvRate(ADS1015_3300_SPS);
-  adc.setMeasureMode(ADS1015_CONTINUOUS);
-  adc.setCompareChannels(ADS1015_COMP_0_GND);
-
-  Serial.println("ADS1015 ready in continuous mode @3300 SPS.");
-}
-
-// ---------- Feature computation ----------
-void compute_features(float &mean_uv, float &rms_uv, float &peak_uv) {
-  float sum    = 0.0f;
-  float sum_sq = 0.0f;
-  float max_abs = 0.0f;
-
-  for (int i = 0; i < PACK_SAMPLES; i++) {
-    float x = samples_uv[i];
-    sum    += x;
-    sum_sq += x * x;
-    float ax = fabsf(x);
-    if (ax > max_abs) max_abs = ax;
-  }
-
-  mean_uv = sum / PACK_SAMPLES;
-  rms_uv  = sqrtf(sum_sq / PACK_SAMPLES);
-  peak_uv = max_abs;
-}
-
-// ---------- HTTP JSON with Arduino_JSON ----------
-void send_packet(unsigned long ts_ms, bool send_features) {
+// -------- HTTP JSON sender --------
+void send_packet(unsigned long ts_ms, float resistencia_val) {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
     if (WiFi.status() != WL_CONNECTED) {
@@ -116,103 +74,74 @@ void send_packet(unsigned long ts_ms, bool send_features) {
     }
   }
 
-  float mean_uv = 0.0f;
-  float rms_uv  = 0.0f;
-  float peak_uv = 0.0f;
-
-  if (send_features) {
-    compute_features(mean_uv, rms_uv, peak_uv);
-  }
-
-  // Build JSON using Arduino_JSON (JSONVar)
   JSONVar doc;
   doc["subject_id"]  = SUBJECT_ID;
   doc["device_id"]   = DEVICE_ID;
   doc["sensor_type"] = SENSOR_TYPE;
-  doc["ts"]          = ts_ms;   // ahora es unsigned long, compatible
+  doc["ts"]          = ts_ms;
 
   JSONVar metrics;
-  JSONVar raw;
-
-  for (int i = 0; i < PACK_SAMPLES; i++) {
-    raw[i] = samples_uv[i];     // microvolts (float)
-  }
-
-  metrics["raw"] = raw;
-
-  if (send_features) {
-    metrics["mean_uv"] = mean_uv;
-    metrics["rms_uv"]  = rms_uv;
-    metrics["peak_uv"] = peak_uv;
-  }
+  metrics["resistencia"] = resistencia_val;
 
   doc["metrics"] = metrics;
 
   String payload = JSON.stringify(doc);
 
-  bool sent = false;
+  WiFiClient client;
+  HTTPClient http;
+  http.begin(client, INGEST_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Api-Key", API_KEY);
 
-  for (int attempt = 1; attempt <= HTTP_RETRIES && !sent; attempt++) {
-    WiFiClient client;
-    HTTPClient http;
+  int httpCode = http.POST(payload);
+  DBG_PRINT("HTTP POST -> code: ");
+  DBG_PRINTLN(httpCode);
 
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    http.begin(client, INGEST_URL);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("X-Api-Key", API_KEY);
-
-    int httpCode = http.POST(payload);
-    DBG_PRINTF("HTTP POST (try %d) -> code: %d\n", attempt, httpCode);
-
-    if (httpCode > 0 && httpCode < 400) {
-      String resp = http.getString();
-      if (resp.length() > 0) {
-        DBG_PRINTLN(resp);
-      }
-      sent = true;
-    } else {
-      DBG_PRINTLN("HTTP POST failed, retrying...");
-      delay(50);  // breve espera antes de reintentar
+  if (httpCode > 0) {
+    String resp = http.getString();
+    if (resp.length() > 0) {
+      DBG_PRINTLN(resp);
     }
-
-    http.end();
+  } else {
+    DBG_PRINTLN("HTTP POST failed.");
   }
 
-  if (!sent) {
-    DBG_PRINTLN("Packet not delivered after retries.");
-  }
+  http.end();
 }
 
-// ---------- Arduino lifecycle ----------
+// -------- Arduino lifecycle --------
 void setup() {
-  Serial.begin(115200);
-  delay(500);
+  if (ENABLE_DEBUG_LOGS) {
+    Serial.begin(115200);
+    delay(500);
+  }
 
-  Wire.begin();            // XIAO ESP32S3 usa pines por defecto; cambia si hace falta
-  Wire.setClock(400000);
-
-  setupADC();
   connectWiFi();
 
-  DBG_PRINTLN("EMG HTTP sender ready (Arduino_JSON).");
+  DBG_PRINTLN("GSR HTTP sender ready (Arduino_JSON).");
 }
 
 void loop() {
-  // Leer una muestra del ADS1015 en modo continuo
-  float mv = adc.getResult_mV();   // millivoltios
-  float uv = mv * 1000.0f;        // microvoltios
+  unsigned long now = millis();
+  if ((now - last_sample_ms) < SAMPLE_PERIOD_MS) {
+    return;
+  }
+  last_sample_ms = now;
 
-  samples_uv[sample_index++] = uv;
+  int raw_adc = analogRead(GSR_PIN);
+  samples_raw[sample_index++] = static_cast<float>(raw_adc);
 
   if (sample_index >= PACK_SAMPLES) {
     unsigned long ts_ms = millis();
-    bool send_features = (packet_index % FEATURE_DECIMATE == 0);
+    float sum = 0.0f;
+    for (int i = 0; i < PACK_SAMPLES; i++) {
+      sum += samples_raw[i];
+    }
+    float resistencia_val = sum / PACK_SAMPLES; // average ADC counts over the packet
 
-    send_packet(ts_ms, send_features);
+    send_packet(ts_ms, resistencia_val);
 
     sample_index = 0;
-    packet_index++;
   }
-
-  // delayMicroseconds(300);  // opcional si quieres forzar ritmo desde MCU
 }
+
