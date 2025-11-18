@@ -5,6 +5,19 @@
 #include <Arduino_JSON.h>
 #include <math.h>
 
+// Uncomment to enable verbose serial debug logs
+//#define ENABLE_DEBUG_LOGS
+
+#ifdef ENABLE_DEBUG_LOGS
+#define DBG_PRINT(...)   Serial.print(__VA_ARGS__)
+#define DBG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#define DBG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+#define DBG_PRINT(...)
+#define DBG_PRINTLN(...)
+#define DBG_PRINTF(...)
+#endif
+
 // ---------- I2C / ADS1015 ----------
 #define I2C_ADDRESS 0x48
 ADS1015_WE adc(I2C_ADDRESS);
@@ -25,6 +38,8 @@ const char* SENSOR_TYPE = "EMG_RAW";
 const int SAMPLE_RATE_HZ   = 3300;   // objetivo, solo referencia
 const int PACK_SAMPLES     = 20;     // nº de muestras por paquete ("raw")
 const int FEATURE_DECIMATE = 10;     // enviar mean/rms/peak cada 10 paquetes
+const int HTTP_RETRIES     = 3;      // reintentos para asegurar el envío
+const int HTTP_TIMEOUT_MS  = 5000;   // timeout del POST en milisegundos
 
 float     samples_uv[PACK_SAMPLES];  // buffer en microvolts
 int       sample_index   = 0;
@@ -36,22 +51,22 @@ void connectWiFi() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to WiFi");
+  DBG_PRINT("Connecting to WiFi");
 
   unsigned long t0 = millis();
   const unsigned long timeout_ms = 15000;
 
   while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeout_ms) {
     delay(500);
-    Serial.print(".");
+    DBG_PRINT(".");
   }
-  Serial.println();
+  DBG_PRINTLN("");
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi connected, IP: ");
-    Serial.println(WiFi.localIP());
+    DBG_PRINT("WiFi connected, IP: ");
+    DBG_PRINTLN(WiFi.localIP());
   } else {
-    Serial.println("WiFi connection FAILED");
+    DBG_PRINTLN("WiFi connection FAILED");
   }
 }
 
@@ -96,7 +111,7 @@ void send_packet(unsigned long ts_ms, bool send_features) {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Skipping packet: no WiFi.");
+      DBG_PRINTLN("Skipping packet: no WiFi.");
       return;
     }
   }
@@ -135,26 +150,37 @@ void send_packet(unsigned long ts_ms, bool send_features) {
 
   String payload = JSON.stringify(doc);
 
-  WiFiClient client;
-  HTTPClient http;
-  http.begin(client, INGEST_URL);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-Api-Key", API_KEY);
+  bool sent = false;
 
-  int httpCode = http.POST(payload);
-  Serial.print("HTTP POST -> code: ");
-  Serial.println(httpCode);
+  for (int attempt = 1; attempt <= HTTP_RETRIES && !sent; attempt++) {
+    WiFiClient client;
+    HTTPClient http;
 
-  if (httpCode > 0) {
-    String resp = http.getString();
-    if (resp.length() > 0) {
-      Serial.println(resp);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.begin(client, INGEST_URL);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Api-Key", API_KEY);
+
+    int httpCode = http.POST(payload);
+    DBG_PRINTF("HTTP POST (try %d) -> code: %d\n", attempt, httpCode);
+
+    if (httpCode > 0 && httpCode < 400) {
+      String resp = http.getString();
+      if (resp.length() > 0) {
+        DBG_PRINTLN(resp);
+      }
+      sent = true;
+    } else {
+      DBG_PRINTLN("HTTP POST failed, retrying...");
+      delay(50);  // breve espera antes de reintentar
     }
-  } else {
-    Serial.println("HTTP POST failed.");
+
+    http.end();
   }
 
-  http.end();
+  if (!sent) {
+    DBG_PRINTLN("Packet not delivered after retries.");
+  }
 }
 
 // ---------- Arduino lifecycle ----------
@@ -168,7 +194,7 @@ void setup() {
   setupADC();
   connectWiFi();
 
-  Serial.println("EMG HTTP sender ready (Arduino_JSON).");
+  DBG_PRINTLN("EMG HTTP sender ready (Arduino_JSON).");
 }
 
 void loop() {
