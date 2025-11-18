@@ -24,9 +24,9 @@ const char* INGEST_URL = "http://192.168.3.79:8000/ingest";
 const char* API_KEY    = "leufu25";
 
 // -------- Logical identifiers --------
-const char* SUBJECT_ID  = "FSR_TEST";
-const char* DEVICE_ID   = "fsr_sender";
-const char* SENSOR_TYPE = "FSR";
+const char* SUBJECT_ID  = "Demo";
+const char* DEVICE_ID   = "GSR01";
+const char* SENSOR_TYPE = "GSR";
 
 // -------- Sampling --------
 const int   FSR_PIN          = A0;      // analog pin for the FSR divider
