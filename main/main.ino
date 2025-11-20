@@ -21,7 +21,7 @@
 const char* WIFI_SSID     = "Wifi_Leufulab";
 const char* WIFI_PASSWORD = "LeufuWifi25";
 
-const char* INGEST_URL = "http://192.168.3.79:8000/ingest";
+const char* INGEST_URL = "http://192.168.3.92:8000/ingest";
 const char* API_KEY    = "leufu25";
 
 // -------- Logical identifiers --------

@@ -20,7 +20,7 @@
 const char* WIFI_SSID     = "Wifi_Leufulab";
 const char* WIFI_PASSWORD = "LeufuWifi25";
 
-const char* INGEST_URL = "http://192.168.3.79:8000/ingest";
+const char* INGEST_URL = "http://192.168.3.92:8000/ingest";
 const char* API_KEY    = "leufu25";
 
 // -------- Logical identifiers --------
@@ -29,7 +29,7 @@ const char* DEVICE_ID   = "fsr_sender";
 const char* SENSOR_TYPE = "FSR";
 
 // -------- Sampling --------
-const int   FSR_PIN          = A0;      // analog pin for the FSR divider
+const int   FSR_PIN          = A10;      // analog pin for the FSR divider
 const int   SAMPLE_RATE_HZ   = 100;     // 100 Hz
 const int   PACK_SAMPLES     = 20;      // samples per raw packet
 const int   FEATURE_DECIMATE = 10;      // send features every 10 packets
