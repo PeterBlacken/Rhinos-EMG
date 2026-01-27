@@ -1,4 +1,3 @@
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Arduino_JSON.h>
@@ -25,18 +24,20 @@ const char* INGEST_URL = "http://192.168.3.92:8000/ingest";
 const char* API_KEY    = "leufu25";
 
 // -------- Logical identifiers --------
-const char* SUBJECT_ID  = "Demo";
-const char* DEVICE_ID   = "GSR01";
-const char* SENSOR_TYPE = "GSR";
+const char* SUBJECT_ID  = "FSR_TEST";
+const char* DEVICE_ID   = "fsr_sender";
+const char* SENSOR_TYPE = "FSR";
 
 // -------- Sampling --------
-const int   GSR_PIN          = A10;      // analog pin for the GSR divider
+const int   FSR_PIN          = A10;      // analog pin for the FSR divider
 const int   SAMPLE_RATE_HZ   = 100;     // 100 Hz
-const int   PACK_SAMPLES     = 20;      // samples per packet
+const int   PACK_SAMPLES     = 20;      // samples per raw packet
+const int   FEATURE_DECIMATE = 10;      // send features every 10 packets
 const float SAMPLE_PERIOD_MS = 1000.0f / SAMPLE_RATE_HZ;
 
 float     samples_raw[PACK_SAMPLES];
 int       sample_index  = 0;
+uint32_t  packet_index  = 0;
 unsigned long last_sample_ms = 0;
 
 // -------- WiFi helpers --------
@@ -64,14 +65,41 @@ void connectWiFi() {
   }
 }
 
+// -------- Feature computation --------
+void compute_features(float &mean_val, float &rms_val, float &peak_val) {
+  float sum     = 0.0f;
+  float sum_sq  = 0.0f;
+  float max_abs = 0.0f;
+
+  for (int i = 0; i < PACK_SAMPLES; i++) {
+    float x = samples_raw[i];
+    sum    += x;
+    sum_sq += x * x;
+    float ax = fabsf(x);
+    if (ax > max_abs) max_abs = ax;
+  }
+
+  mean_val = sum / PACK_SAMPLES;
+  rms_val  = sqrtf(sum_sq / PACK_SAMPLES);
+  peak_val = max_abs;
+}
+
 // -------- HTTP JSON sender --------
-void send_packet(unsigned long ts_ms, float resistencia_val) {
+void send_packet(unsigned long ts_ms, bool send_features) {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
     if (WiFi.status() != WL_CONNECTED) {
       DBG_PRINTLN("Skipping packet: no WiFi.");
       return;
     }
+  }
+
+  float mean_val = 0.0f;
+  float rms_val  = 0.0f;
+  float peak_val = 0.0f;
+
+  if (send_features) {
+    compute_features(mean_val, rms_val, peak_val);
   }
 
   JSONVar doc;
@@ -81,7 +109,19 @@ void send_packet(unsigned long ts_ms, float resistencia_val) {
   doc["ts"]          = ts_ms;
 
   JSONVar metrics;
-  metrics["resistencia"] = resistencia_val;
+  JSONVar raw;
+
+  for (int i = 0; i < PACK_SAMPLES; i++) {
+    raw[i] = samples_raw[i];
+  }
+
+  metrics["raw"] = raw;
+
+  if (send_features) {
+    metrics["mean"] = mean_val;
+    metrics["rms"]  = rms_val;
+    metrics["peak"] = peak_val;
+  }
 
   doc["metrics"] = metrics;
 
@@ -118,7 +158,7 @@ void setup() {
 
   connectWiFi();
 
-  DBG_PRINTLN("GSR HTTP sender ready (Arduino_JSON).");
+  DBG_PRINTLN("FSR HTTP sender ready (Arduino_JSON).");
 }
 
 void loop() {
@@ -128,20 +168,16 @@ void loop() {
   }
   last_sample_ms = now;
 
-  int raw_adc = analogRead(GSR_PIN);
+  int raw_adc = analogRead(FSR_PIN);
   samples_raw[sample_index++] = static_cast<float>(raw_adc);
 
   if (sample_index >= PACK_SAMPLES) {
     unsigned long ts_ms = millis();
-    float sum = 0.0f;
-    for (int i = 0; i < PACK_SAMPLES; i++) {
-      sum += samples_raw[i];
-    }
-    float resistencia_val = sum / PACK_SAMPLES; // average ADC counts over the packet
+    bool send_features = (packet_index % FEATURE_DECIMATE == 0);
 
-    send_packet(ts_ms, resistencia_val);
+    send_packet(ts_ms, send_features);
 
     sample_index = 0;
+    packet_index++;
   }
 }
-
